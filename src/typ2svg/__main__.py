@@ -9,7 +9,7 @@ from .pipeline import Typ2SvgResult, typ2svg
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m typ2svg",
+        prog="typ2svg",
         description="Convert a Typst source file to selectable-text SVG.",
     )
     parser.add_argument("src", type=Path, help="Typst source file to compile")

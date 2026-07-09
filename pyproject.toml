@@ -11,6 +11,9 @@ dependencies = [
     "fonttools[woff]>=4.0",
 ]
 
+[project.scripts]
+typ2svg = "typ2svg.__main__:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

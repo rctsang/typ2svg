@@ -20,5 +20,10 @@ from typ2svg import typ2svg
 typ2svg("input.typ", "output.svg")
 ```
 
-`typ2svg` asserts at import time that `typst` and `mutool` are available on `PATH`.
+or from the command line:
 
+```bash
+typ2svg input.typ output.svg
+```
+
+`typ2svg` asserts at import time that `typst` and `mutool` are available on `PATH`.
