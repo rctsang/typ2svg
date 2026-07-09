@@ -47,7 +47,7 @@ def test_compile_typst_builds_command(monkeypatch, tmp_path):
     ]]
 
 
-def test_convert_pdf_to_svg_returns_existing_output(monkeypatch, tmp_path):
+def test_mutool_convert_returns_existing_output(monkeypatch, tmp_path):
     pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
     pdf = tmp_path / "input.pdf"
     pdf.write_text("pdf")
@@ -59,4 +59,4 @@ def test_convert_pdf_to_svg_returns_existing_output(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pipeline.subprocess, "run", run)
 
-    assert pipeline.convert_pdf_to_svg(pdf, output) == [output]
+    assert pipeline.mutool_convert(pdf, output) == [output]

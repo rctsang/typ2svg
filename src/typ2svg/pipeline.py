@@ -49,7 +49,7 @@ def compile_typst(
     return pdf
 
 
-def convert_pdf_to_svg(pdf: PathLike, output: PathLike) -> list[Path]:
+def mutool_convert(pdf: PathLike, output: PathLike) -> list[Path]:
     pdf = Path(pdf)
     output = Path(output)
     if output.suffix.lower() == ".svg":
@@ -94,7 +94,7 @@ def typ2svg(
     with tempfile.TemporaryDirectory(prefix="typ2svg-") as tmpdir:
         pdf = Path(tmpdir) / f"{src.stem}.pdf"
         compile_typst(src, pdf, root=root, font_paths=font_paths)
-        svgs = convert_pdf_to_svg(pdf, dst)
+        svgs = mutool_convert(pdf, dst)
         for svg in svgs:
             embed_fonts(svg, strict=strict_fonts)
 
