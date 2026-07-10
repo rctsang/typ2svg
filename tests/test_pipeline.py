@@ -60,3 +60,33 @@ def test_mutool_convert_returns_existing_output(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.subprocess, "run", run)
 
     assert pipeline.mutool_convert(pdf, output) == [output]
+
+
+def test_mutool_convert_returns_numbered_svg_for_file_output(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    pdf = tmp_path / "input.pdf"
+    pdf.write_text("pdf")
+    output = tmp_path / "output.svg"
+    numbered_output = tmp_path / "output1.svg"
+
+    def run(command, capture_output, text):
+        numbered_output.write_text("<svg />")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(pipeline.subprocess, "run", run)
+
+    assert pipeline.mutool_convert(pdf, output) == [numbered_output]
+
+
+def test_match_font_variant_accepts_compacted_pdf_font_name(monkeypatch, tmp_path):
+    fonts = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.fonts")
+    variant = fonts.FontVariant(
+        family="DejaVu Sans",
+        location="/tmp/font.ttf",
+        style="Normal",
+        weight="400",
+        stretch="100%",
+        variable=False,
+    )
+
+    assert fonts.match_font_variant(fonts.FontDependency("DejaVuSans"), [variant]) == variant

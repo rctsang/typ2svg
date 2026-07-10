@@ -55,9 +55,16 @@ def mutool_convert(pdf: PathLike, output: PathLike) -> list[Path]:
     if output.suffix.lower() == ".svg":
         output.parent.mkdir(parents=True, exist_ok=True)
         pattern = output
+        fallback_glob = f"{output.stem}*{output.suffix}"
     else:
         output.mkdir(parents=True, exist_ok=True)
         pattern = output / f"{pdf.stem}-%d.svg"
+        fallback_glob = None
+
+    existing = {
+        path: path.stat().st_mtime_ns
+        for path in pattern.parent.glob(fallback_glob or pattern.name.replace("%d", "*"))
+    }
 
     command = [
         "mutool",
@@ -72,9 +79,14 @@ def mutool_convert(pdf: PathLike, output: PathLike) -> list[Path]:
     ]
     _run(command)
 
-    if pattern.exists():
+    if pattern.exists() and existing.get(pattern) != pattern.stat().st_mtime_ns:
         return [pattern]
-    return sorted(pattern.parent.glob(pattern.name.replace("%d", "*")))
+
+    glob_pattern = fallback_glob or pattern.name.replace("%d", "*")
+    return [
+        path for path in sorted(pattern.parent.glob(glob_pattern))
+        if existing.get(path) != path.stat().st_mtime_ns
+    ]
 
 
 def typ2svg(

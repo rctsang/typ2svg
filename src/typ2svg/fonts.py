@@ -107,6 +107,13 @@ def normalize_font_family(family: str) -> str:
     return family.strip().strip("'\"")
 
 
+def _font_family_key(family: str) -> str:
+    return "".join(
+        char for char in normalize_font_family(family).casefold()
+        if char.isalnum()
+    )
+
+
 def _normalize_style(style: str | None) -> str | None:
     if style is None:
         return None
@@ -144,13 +151,18 @@ def match_font_variant(
 
     variants = variants if variants is not None else get_fonts()
     family = normalize_font_family(dependency.family).casefold()
+    family_key = _font_family_key(dependency.family)
     style = _normalize_style(dependency.style)
     weight = _normalize_weight(dependency.weight)
     stretch = _normalize_stretch(dependency.stretch)
 
     candidates = [
         variant for variant in variants
-        if variant.location != "(Embedded)" and variant.family.casefold() == family
+        if variant.location != "(Embedded)"
+        and (
+            variant.family.casefold() == family
+            or _font_family_key(variant.family) == family_key
+        )
     ]
     if not candidates:
         return None

@@ -4,7 +4,12 @@ import xml.etree.ElementTree as ETree
 from pathlib import Path
 from typing import Iterable
 
-from .fonts import FontDependency, encode_variant, match_font_variant
+from .fonts import (
+    FontDependency,
+    encode_variant,
+    match_font_variant,
+    normalize_font_family,
+)
 
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 ETree.register_namespace("", SVG_NAMESPACE)
@@ -105,7 +110,7 @@ def _font_face(dependency: FontDependency) -> str | None:
 
     declarations = [
         "@font-face {",
-        f'  font-family: "{variant.family}";',
+        f'  font-family: "{normalize_font_family(dependency.family)}";',
         f"  font-style: {(variant.style or 'Normal').lower()};",
         f"  font-weight: {variant.weight or '400'};",
     ]
@@ -136,7 +141,7 @@ def embed_fonts(
 ) -> None:
     dependencies = list(dependencies) if dependencies is not None else get_font_dependencies(svgpath)
     rules: list[str] = []
-    seen_variants: set[tuple[str, str | None, str | None, str | None]] = set()
+    seen_variants: set[tuple[str, str, str | None, str | None, str | None]] = set()
 
     for dependency in dependencies:
         variant = match_font_variant(dependency)
@@ -144,7 +149,13 @@ def embed_fonts(
             if strict:
                 raise ValueError(f"could not find font variant for {dependency.family!r}")
             continue
-        key = (variant.family, variant.style, variant.weight, variant.stretch)
+        key = (
+            normalize_font_family(dependency.family),
+            variant.family,
+            variant.style,
+            variant.weight,
+            variant.stretch,
+        )
         if key in seen_variants:
             continue
         seen_variants.add(key)
