@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 from base64 import b64encode
+from functools import lru_cache
 from io import BytesIO
 from typing import NamedTuple
 
@@ -27,6 +28,7 @@ RE_VARIANT = re.compile(
     r"^\s*[├└]\s+(?P<location>.+?)(?P<variable> \(Variable\))?$")
 RE_ATTR = re.compile(
     r"(Style|Weight|Stretch):\s*([^,]+)")
+FONT_ALIAS_NAME_IDS = {1, 4, 6, 16, 21}
 
 _VARIANTS: list[FontVariant]|None = None
 
@@ -107,11 +109,41 @@ def normalize_font_family(family: str) -> str:
     return family.strip().strip("'\"")
 
 
-def _font_family_key(family: str) -> str:
-    return "".join(
-        char for char in normalize_font_family(family).casefold()
-        if char.isalnum()
-    )
+def _font_alias_key(family: str) -> str:
+    family = normalize_font_family(family)
+    if len(family) > 7 and family[6] == "+" and family[:6].isupper():
+        family = family[7:]
+    return family.casefold()
+
+
+@lru_cache(maxsize=None)
+def _font_metadata_aliases(location: str) -> frozenset[str]:
+    font = TTFont(location, lazy=True)
+    try:
+        names: set[str] = set()
+        for record in font["name"].names:
+            if record.nameID not in FONT_ALIAS_NAME_IDS:
+                continue
+            try:
+                name = record.toUnicode().strip()
+            except UnicodeDecodeError:
+                continue
+            if name:
+                names.add(name)
+        return frozenset(names)
+    finally:
+        font.close()
+
+
+def font_aliases(variant: FontVariant) -> set[str]:
+    aliases = {variant.family}
+    if variant.location == "(Embedded)":
+        return aliases
+    try:
+        aliases.update(_font_metadata_aliases(variant.location))
+    except Exception:
+        pass
+    return aliases
 
 
 def _normalize_style(style: str | None) -> str | None:
@@ -150,8 +182,7 @@ def match_font_variant(
     """Return the best locally available Typst font variant for a dependency."""
 
     variants = variants if variants is not None else get_fonts()
-    family = normalize_font_family(dependency.family).casefold()
-    family_key = _font_family_key(dependency.family)
+    family_key = _font_alias_key(dependency.family)
     style = _normalize_style(dependency.style)
     weight = _normalize_weight(dependency.weight)
     stretch = _normalize_stretch(dependency.stretch)
@@ -159,11 +190,14 @@ def match_font_variant(
     candidates = [
         variant for variant in variants
         if variant.location != "(Embedded)"
-        and (
-            variant.family.casefold() == family
-            or _font_family_key(variant.family) == family_key
-        )
+        and _font_alias_key(variant.family) == family_key
     ]
+    if not candidates:
+        candidates = [
+            variant for variant in variants
+            if variant.location != "(Embedded)"
+            and family_key in {_font_alias_key(alias) for alias in font_aliases(variant)}
+        ]
     if not candidates:
         return None
 

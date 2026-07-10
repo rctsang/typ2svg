@@ -78,7 +78,7 @@ def test_mutool_convert_returns_numbered_svg_for_file_output(monkeypatch, tmp_pa
     assert pipeline.mutool_convert(pdf, output) == [numbered_output]
 
 
-def test_match_font_variant_accepts_compacted_pdf_font_name(monkeypatch, tmp_path):
+def test_match_font_variant_accepts_font_metadata_alias(monkeypatch, tmp_path):
     fonts = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.fonts")
     variant = fonts.FontVariant(
         family="DejaVu Sans",
@@ -87,6 +87,11 @@ def test_match_font_variant_accepts_compacted_pdf_font_name(monkeypatch, tmp_pat
         weight="400",
         stretch="100%",
         variable=False,
+    )
+    monkeypatch.setattr(
+        fonts,
+        "font_aliases",
+        lambda matched: {"DejaVu Sans", "DejaVuSans"},
     )
 
     assert fonts.match_font_variant(fonts.FontDependency("DejaVuSans"), [variant]) == variant
