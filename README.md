@@ -8,7 +8,7 @@ typst can compile to svg, but the resulting svg is entirely glyph-based to prese
 
 for various reasons, i want an svg output that has selectable text, and determined that the following pipeline is somewhat viable:
 - typst compile to pdf: `typst compile ...`
-- mutool convert pdf to text-based svg: `mutool convert -F svg -O text=text ...`
+- PyMuPDF render pdf to text-based svg
 - post-process the svg by embedding the required font in base64 via css style tag
 - optionally use inkscape to handle additional formatting
 
@@ -26,4 +26,4 @@ or from the command line:
 typ2svg input.typ output.svg
 ```
 
-`typ2svg` asserts at import time that `typst` and `mutool` are available on `PATH`.
+`typ2svg` asserts at import time that `typst` is available on `PATH`.

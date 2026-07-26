@@ -9,7 +9,7 @@ import sys
 def import_typ2svg_module(monkeypatch, tmp_path, name: str):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    for command in ("typst", "mutool"):
+    for command in ("typst",):
         path = bindir / command
         path.write_text("#!/bin/sh\nexit 0\n")
         path.chmod(0o755)
@@ -47,35 +47,88 @@ def test_compile_typst_builds_command(monkeypatch, tmp_path):
     ]]
 
 
-def test_mutool_convert_returns_existing_output(monkeypatch, tmp_path):
+class FakePage:
+    def __init__(self, svg: str) -> None:
+        self.svg = svg
+        self.text_as_path = None
+
+    def get_svg_image(self, text_as_path=True):
+        self.text_as_path = text_as_path
+        return self.svg
+
+
+class FakeDocument:
+    def __init__(self, pages: list[FakePage]) -> None:
+        self.pages = pages
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def __iter__(self):
+        return iter(self.pages)
+
+
+def test_mupdf_convert_writes_single_combined_svg(monkeypatch, tmp_path):
     pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
     pdf = tmp_path / "input.pdf"
     pdf.write_text("pdf")
     output = tmp_path / "output.svg"
+    pages = [
+        FakePage('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><text>one</text></svg>'),
+        FakePage('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="50"><text>two</text></svg>'),
+    ]
+    document = FakeDocument(pages)
 
-    def run(command, capture_output, text):
-        output.write_text("<svg />")
-        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
 
-    monkeypatch.setattr(pipeline.subprocess, "run", run)
+    assert pipeline.mupdf_convert(pdf, output) == [output]
 
-    assert pipeline.mutool_convert(pdf, output) == [output]
+    tree = pipeline.ETree.parse(output)
+    root = tree.getroot()
+    nested = list(root)
+    assert root.get("width") == "100"
+    assert root.get("height") == "90"
+    assert root.get("viewBox") == "0 0 100 90"
+    assert [page.get("y") for page in nested] == ["0", "40"]
+    assert [page.text_as_path for page in pages] == [False, False]
 
 
-def test_mutool_convert_returns_numbered_svg_for_file_output(monkeypatch, tmp_path):
+def test_mupdf_convert_writes_pdf_stem_svg_for_directory_output(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    pdf = tmp_path / "input.pdf"
+    pdf.write_text("pdf")
+    output_dir = tmp_path / "svgs"
+    document = FakeDocument([
+        FakePage('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40" />'),
+    ])
+
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
+
+    assert pipeline.mupdf_convert(pdf, output_dir) == [output_dir / "input.svg"]
+
+
+def test_mupdf_convert_prefixes_page_ids(monkeypatch, tmp_path):
     pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
     pdf = tmp_path / "input.pdf"
     pdf.write_text("pdf")
     output = tmp_path / "output.svg"
-    numbered_output = tmp_path / "output1.svg"
+    document = FakeDocument([
+        FakePage('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><clipPath id="clip"><path /></clipPath><g clip-path="url(#clip)" /></svg>'),
+        FakePage('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><clipPath id="clip"><path /></clipPath><g clip-path="url(#clip)" /></svg>'),
+    ])
 
-    def run(command, capture_output, text):
-        numbered_output.write_text("<svg />")
-        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
 
-    monkeypatch.setattr(pipeline.subprocess, "run", run)
+    pipeline.mupdf_convert(pdf, output)
 
-    assert pipeline.mutool_convert(pdf, output) == [numbered_output]
+    text = output.read_text()
+    assert 'id="p1-clip"' in text
+    assert 'clip-path="url(#p1-clip)"' in text
+    assert 'id="p2-clip"' in text
+    assert 'clip-path="url(#p2-clip)"' in text
 
 
 def test_match_font_variant_accepts_font_metadata_alias(monkeypatch, tmp_path):

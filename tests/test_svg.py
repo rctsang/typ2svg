@@ -8,7 +8,7 @@ import sys
 def import_typ2svg_module(monkeypatch, tmp_path, name: str):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    for command in ("typst", "mutool"):
+    for command in ("typst",):
         path = bindir / command
         path.write_text("#!/bin/sh\nexit 0\n")
         path.chmod(0o755)
