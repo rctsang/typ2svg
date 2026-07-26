@@ -226,6 +226,97 @@ def test_mupdf_convert_uses_fragment_for_internal_page_link(monkeypatch, tmp_pat
     assert '<rect x="10" y="10" width="20" height="10"' in text
 
 
+def test_mupdf_convert_supports_safe_launch_fragment_links(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    pdf = tmp_path / "input.pdf"
+    pdf.write_text("pdf")
+    output = tmp_path / "output.svg"
+    rawdict = {
+        "blocks": [{
+            "lines": [{
+                "spans": [{
+                    "chars": [
+                        {"c": "O", "bbox": (10, 10, 20, 30)},
+                        {"c": "l", "bbox": (20, 10, 30, 30)},
+                        {"c": "d", "bbox": (30, 10, 40, 30)},
+                        {"c": "N", "bbox": (10, 30, 20, 50)},
+                        {"c": "e", "bbox": (20, 30, 30, 50)},
+                        {"c": "w", "bbox": (30, 30, 40, 50)},
+                    ],
+                }],
+            }],
+        }],
+    }
+    document = FakeDocument([
+        FakePage(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><text><tspan x="10 20 30" y="20">Old</tspan><tspan x="10 20 30" y="40">New</tspan></text></svg>',
+            links=[{
+                "kind": pipeline.pymupdf.LINK_LAUNCH,
+                "from": FakeRect(10, 30, 40, 50),
+                "file": "#",
+            }],
+            rawdict=rawdict,
+        ),
+    ])
+
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
+
+    pipeline.mupdf_convert(pdf, output)
+
+    text = output.read_text()
+    assert '<a href="#"' in text
+    assert ">New</" in text
+    assert ">Old</" in text
+
+
+def test_mupdf_convert_uses_svg_transforms_to_choose_link_text(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    pdf = tmp_path / "input.pdf"
+    pdf.write_text("pdf")
+    output = tmp_path / "output.svg"
+    rawdict = {
+        "blocks": [{
+            "lines": [{
+                "spans": [{
+                    "chars": [
+                        {"c": "S", "bbox": (10, 90, 20, 110)},
+                        {"c": "a", "bbox": (20, 90, 30, 110)},
+                        {"c": "m", "bbox": (30, 90, 40, 110)},
+                        {"c": "e", "bbox": (40, 90, 50, 110)},
+                    ],
+                }],
+            }],
+        }],
+    }
+    document = FakeDocument([
+        FakePage(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><text transform="matrix(1 0 0 1 10 20)"><tspan x="0 10 20 30" y="0">Same</tspan></text><text transform="matrix(1 0 0 1 10 100)"><tspan x="0 10 20 30" y="0">Same</tspan></text></svg>',
+            links=[{
+                "kind": pipeline.pymupdf.LINK_URI,
+                "from": FakeRect(10, 90, 50, 110),
+                "uri": "https://example.com",
+            }],
+            rawdict=rawdict,
+        ),
+    ])
+
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
+
+    pipeline.mupdf_convert(pdf, output)
+
+    root = pipeline.ETree.parse(output).getroot()
+    parents = {child: parent for parent in root.iter() for child in parent}
+    anchors = [
+        element for element in root.iter(f"{{{pipeline.SVG_NAMESPACE}}}a")
+        if element.get("href") == "https://example.com"
+    ]
+    linked_tspan = list(anchors[0])[0]
+    linked_text = parents[linked_tspan]
+    while linked_text.tag.rsplit("}", 1)[-1] != "text":
+        linked_text = parents[linked_text]
+    assert linked_text.get("transform") == "matrix(1 0 0 1 10 100)"
+
+
 def test_match_font_variant_accepts_font_metadata_alias(monkeypatch, tmp_path):
     fonts = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.fonts")
     variant = fonts.FontVariant(

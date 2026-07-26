@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ETree
@@ -14,6 +15,7 @@ PathLike: TypeAlias = str | Path
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 INKSCAPE_NAMESPACE = "http://www.inkscape.org/namespaces/inkscape"
+TRANSFORM_RE = re.compile(r"(matrix|translate)\(([^)]*)\)")
 
 ETree.register_namespace("", SVG_NAMESPACE)
 ETree.register_namespace("xlink", XLINK_NAMESPACE)
@@ -93,16 +95,8 @@ def _rect_tuple(rect) -> tuple[float, float, float, float]:
     return (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
 
 
-def _intersects(
-    first: tuple[float, float, float, float],
-    second: tuple[float, float, float, float],
-) -> bool:
-    return (
-        first[0] < second[2]
-        and first[2] > second[0]
-        and first[1] < second[3]
-        and first[3] > second[1]
-    )
+def _contains_point(rect: tuple[float, float, float, float], x: float, y: float) -> bool:
+    return rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
 
 
 def _linked_text(page, rect: tuple[float, float, float, float]) -> str:
@@ -118,9 +112,24 @@ def _linked_text(page, rect: tuple[float, float, float, float]) -> str:
                     bbox = tuple(
                         float(value) for value in char.get("bbox", (0, 0, 0, 0))
                     )
-                    if _intersects(rect, bbox):
+                    if _contains_point(
+                        rect,
+                        (bbox[0] + bbox[2]) / 2,
+                        (bbox[1] + bbox[3]) / 2,
+                    ):
                         text.append(char.get("c", ""))
     return "".join(text).strip()
+
+
+def _safe_launch_href(link: dict) -> str | None:
+    href = link.get("file")
+    if not isinstance(href, str):
+        return None
+    if href.startswith("#"):
+        return href
+    if href.startswith(("http://", "https://", "mailto:")):
+        return href
+    return None
 
 
 def _extract_links(page, page_count: int) -> list[PdfLink]:
@@ -139,6 +148,8 @@ def _extract_links(page, page_count: int) -> list[PdfLink]:
             target_page = link.get("page")
             if isinstance(target_page, int) and 0 <= target_page < page_count:
                 href = f"#page-{target_page + 1}"
+        elif kind == pymupdf.LINK_LAUNCH:
+            href = _safe_launch_href(link)
         if href:
             links.append(PdfLink(href, rect, _linked_text(page, rect)))
     return links
@@ -176,6 +187,81 @@ def _split_coordinates(value: str | None) -> list[str] | None:
         return None
     coordinates = value.replace(",", " ").split()
     return coordinates or None
+
+
+def _parse_transform_numbers(value: str) -> list[float]:
+    return [float(number) for number in re.split(r"[\s,]+", value.strip()) if number]
+
+
+def _multiply_matrix(
+    first: tuple[float, float, float, float, float, float],
+    second: tuple[float, float, float, float, float, float],
+) -> tuple[float, float, float, float, float, float]:
+    a1, b1, c1, d1, e1, f1 = first
+    a2, b2, c2, d2, e2, f2 = second
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    )
+
+
+def _parse_transform(value: str | None) -> tuple[float, float, float, float, float, float]:
+    matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    if not value:
+        return matrix
+
+    for name, arguments in TRANSFORM_RE.findall(value):
+        numbers = _parse_transform_numbers(arguments)
+        if name == "matrix" and len(numbers) == 6:
+            transform = tuple(numbers)
+        elif name == "translate" and numbers:
+            transform = (
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                numbers[0],
+                numbers[1] if len(numbers) > 1 else 0.0,
+            )
+        else:
+            continue
+        matrix = _multiply_matrix(matrix, transform)
+    return matrix
+
+
+def _element_transform(
+    element: ETree.Element,
+    parents: dict[ETree.Element, ETree.Element],
+) -> tuple[float, float, float, float, float, float]:
+    chain = [element]
+    while chain[-1] in parents:
+        chain.append(parents[chain[-1]])
+
+    matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    for item in reversed(chain):
+        matrix = _multiply_matrix(matrix, _parse_transform(item.get("transform")))
+    return matrix
+
+
+def _transform_point(
+    matrix: tuple[float, float, float, float, float, float],
+    x: float,
+    y: float,
+) -> tuple[float, float]:
+    a, b, c, d, e, f = matrix
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def _range_end_x(coordinates: list[float], end: int) -> float:
+    if end < len(coordinates):
+        return coordinates[end]
+    if len(coordinates) > 1:
+        return coordinates[-1] + coordinates[-1] - coordinates[-2]
+    return coordinates[-1]
 
 
 def _copy_text_element(
@@ -243,22 +329,29 @@ def _wrap_text_element(
 
 
 def _text_center_score(
+    parents: dict[ETree.Element, ETree.Element],
     element: ETree.Element,
     start: int,
     end: int,
     rect: tuple[float, float, float, float],
 ) -> float:
-    coordinates = _split_coordinates(element.get("x"))
+    coordinates = [
+        float(value) for value in _split_coordinates(element.get("x")) or []
+    ]
     y = element.get("y")
-    if coordinates is None or y is None or start >= len(coordinates):
-        return 0.0
+    if y is None or start >= len(coordinates):
+        return 1_000_000_000.0
     x0 = float(coordinates[start])
-    x1 = float(coordinates[end]) if end < len(coordinates) else float(coordinates[-1])
-    cy = abs(float(y))
-    cx = (x0 + x1) / 2
+    x1 = _range_end_x(coordinates, end)
+    cx, cy = _transform_point(
+        _element_transform(element, parents),
+        (x0 + x1) / 2,
+        float(y),
+    )
     rx = (rect[0] + rect[2]) / 2
     ry = (rect[1] + rect[3]) / 2
-    return abs(cx - rx) + abs(cy - ry)
+    penalty = 0.0 if _contains_point(rect, cx, cy) else 1_000_000.0
+    return penalty + abs(cx - rx) + abs(cy - ry)
 
 
 def _wrap_link_text(root: ETree.Element, link: PdfLink) -> bool:
@@ -266,6 +359,7 @@ def _wrap_link_text(root: ETree.Element, link: PdfLink) -> bool:
         return False
 
     candidates: list[tuple[float, ETree.Element, int, int]] = []
+    parents = _parent_map(root)
     for element in root.iter():
         if _local_name(element.tag) != "tspan" or not element.text:
             continue
@@ -273,7 +367,7 @@ def _wrap_link_text(root: ETree.Element, link: PdfLink) -> bool:
         while start >= 0:
             end = start + len(link.text)
             candidates.append((
-                _text_center_score(element, start, end, link.rect),
+                _text_center_score(parents, element, start, end, link.rect),
                 element,
                 start,
                 end,
