@@ -56,9 +56,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(result.pdf)
         for svg in result.svgs:
             print(svg)
-    elif isinstance(result, list):
-        for svg in result:
-            print(svg)
     else:
         print(result)
     return 0

@@ -50,8 +50,8 @@ def test_embed_fonts_inserts_font_face_rule(monkeypatch, tmp_path):
         stretch="100%",
         variable=False,
     )
-    monkeypatch.setattr(svg, "match_font_variant", lambda dependency: variant)
-    monkeypatch.setattr(svg, "encode_variant", lambda matched: "Zm9udA==")
+    monkeypatch.setattr(svg, "match_font_variant", lambda dependency, **kwargs: variant)
+    monkeypatch.setattr(svg, "encode_variant", lambda matched, text=None: "Zm9udA==")
 
     svg.embed_fonts(path)
 
@@ -78,10 +78,31 @@ def test_embed_fonts_uses_svg_font_family_name(monkeypatch, tmp_path):
         stretch="100%",
         variable=False,
     )
-    monkeypatch.setattr(svg, "match_font_variant", lambda dependency: variant)
-    monkeypatch.setattr(svg, "encode_variant", lambda matched: "Zm9udA==")
+    monkeypatch.setattr(svg, "match_font_variant", lambda dependency, **kwargs: variant)
+    monkeypatch.setattr(svg, "encode_variant", lambda matched, text=None: "Zm9udA==")
 
     svg.embed_fonts(path)
 
     output = path.read_text()
     assert 'font-family: "DejaVuSans";' in output
+
+
+def test_embed_fonts_subsets_to_used_characters(monkeypatch, tmp_path):
+    svg = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.svg")
+    fonts = importlib.import_module("typ2svg.fonts")
+    path = tmp_path / "input.svg"
+    path.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg">
+  <text font-family="Foo"><tspan>ab</tspan></text>
+  <text font-family="Foo"><tspan>bc</tspan></text>
+</svg>"""
+    )
+    variant = fonts.FontVariant("Foo", "/tmp/font.ttf", "Normal", "400", "100%", False)
+    texts = []
+    monkeypatch.setattr(svg, "match_font_variant", lambda dependency, **kwargs: variant)
+    monkeypatch.setattr(svg, "encode_variant", lambda matched, text=None: texts.append(text) or "Zm9udA==")
+
+    svg.embed_fonts(path)
+
+    assert texts == ["abc"]
+    assert path.read_text().count("@font-face") == 1

@@ -334,3 +334,187 @@ def test_match_font_variant_accepts_font_metadata_alias(monkeypatch, tmp_path):
     )
 
     assert fonts.match_font_variant(fonts.FontDependency("DejaVuSans"), [variant]) == variant
+
+
+def _single_line_rawdict(text: str, x0: float, y0: float, step: float, height: float) -> dict:
+    return {
+        "blocks": [{
+            "lines": [{
+                "spans": [{
+                    "chars": [
+                        {"c": c, "bbox": (x0 + i * step, y0, x0 + (i + 1) * step, y0 + height)}
+                        for i, c in enumerate(text)
+                    ],
+                }],
+            }],
+        }],
+    }
+
+
+def test_mupdf_convert_drops_unsafe_uri_links(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    pdf = tmp_path / "input.pdf"
+    pdf.write_text("pdf")
+    output = tmp_path / "output.svg"
+    document = FakeDocument([
+        FakePage(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><text><tspan x="10 16 22" y="20">Bad</tspan></text></svg>',
+            links=[
+                {"kind": pipeline.pymupdf.LINK_URI, "from": FakeRect(10, 10, 28, 20), "uri": "javascript:alert(1)"},
+                {"kind": pipeline.pymupdf.LINK_URI, "from": FakeRect(10, 10, 28, 20), "uri": " JavaScript:alert(1)"},
+                {"kind": pipeline.pymupdf.LINK_LAUNCH, "from": FakeRect(10, 10, 28, 20), "file": "/etc/passwd"},
+            ],
+            rawdict=_single_line_rawdict("Bad", 10, 10, 6, 10),
+        ),
+    ])
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
+
+    pipeline.mupdf_convert(pdf, output)
+
+    text = output.read_text()
+    assert "javascript" not in text.lower()
+    assert "passwd" not in text
+    assert "<a " not in text
+
+
+def test_safe_href_allowlist(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    assert pipeline._safe_href("HTTPS://example.com") == "HTTPS://example.com"
+    assert pipeline._safe_href("mailto:a@b.c") == "mailto:a@b.c"
+    assert pipeline._safe_href("#page-2") == "#page-2"
+    assert pipeline._safe_href("data:text/html,x") is None
+    assert pipeline._safe_href("file:///etc/passwd") is None
+    assert pipeline._safe_href(None) is None
+
+
+def test_link_text_outside_rect_falls_back_to_rect(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    pdf = tmp_path / "input.pdf"
+    pdf.write_text("pdf")
+    output = tmp_path / "output.svg"
+    # The PDF says "here" is at y=100, but the only SVG "here" sits at y=20.
+    document = FakeDocument([
+        FakePage(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><text><tspan x="10 16 22 28" y="20">here</tspan></text></svg>',
+            links=[{"kind": pipeline.pymupdf.LINK_URI, "from": FakeRect(10, 90, 34, 110), "uri": "https://example.com"}],
+            rawdict=_single_line_rawdict("here", 10, 90, 6, 20),
+        ),
+    ])
+    monkeypatch.setattr(pipeline.pymupdf, "open", lambda path: document)
+
+    pipeline.mupdf_convert(pdf, output)
+
+    root = pipeline.ETree.parse(output).getroot()
+    anchors = list(root.iter(f"{{{pipeline.SVG_NAMESPACE}}}a"))
+    assert len(anchors) == 1
+    assert [pipeline._local_name(child.tag) for child in anchors[0]] == ["rect"]
+
+
+def test_link_does_not_rewrap_already_linked_text(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    root = pipeline.ETree.fromstring(
+        '<svg xmlns="http://www.w3.org/2000/svg"><text><tspan x="10 16 22 28" y="20">here</tspan></text></svg>'
+    )
+    link = pipeline.PdfLink("https://a.example", (10, 10, 34, 22), "here")
+    other = pipeline.PdfLink("https://b.example", (10, 10, 34, 22), "here")
+
+    pipeline._add_links(root, [link, other])
+
+    anchors = list(root.iter(f"{{{pipeline.SVG_NAMESPACE}}}a"))
+    assert [a.get("href") for a in anchors] == ["https://a.example", "https://b.example"]
+    for anchor in anchors:
+        assert not list(anchor.iter(f"{{{pipeline.SVG_NAMESPACE}}}a"))[1:]
+
+
+def test_wrap_keeps_position_and_unique_ids_without_per_char_x(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    root = pipeline.ETree.fromstring(
+        '<svg xmlns="http://www.w3.org/2000/svg"><text><tspan id="t" x="5" y="20">ab</tspan></text></svg>'
+    )
+    tspan = next(root.iter(f"{{{pipeline.SVG_NAMESPACE}}}tspan"))
+
+    pipeline._wrap_text_element(pipeline._parent_map(root), tspan, 1, 2, "#x")
+
+    tspans = list(root.iter(f"{{{pipeline.SVG_NAMESPACE}}}tspan"))
+    assert [t.text for t in tspans] == ["a", "b"]
+    assert tspans[0].get("x") == "5"
+    assert tspans[1].get("x") is None
+    assert [t.get("id") for t in tspans] == ["t", None]
+
+
+def test_prefix_svg_ids_rewrites_references(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    root = pipeline.ETree.fromstring(
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<clipPath id="c"/><g clip-path="url(\'#c\')" fill="url(#c) none"/>'
+        '<use xlink:href="#c"/><use href="#other"/></svg>'
+    )
+
+    pipeline._prefix_svg_ids(root, "p1-")
+
+    text = pipeline.ETree.tostring(root, encoding="unicode")
+    assert 'id="p1-c"' in text
+    assert "clip-path=\"url('#p1-c')\"" in text
+    assert 'fill="url(#p1-c) none"' in text
+    assert 'xlink:href="#p1-c"' in text
+    assert 'href="#other"' in text
+
+
+def test_resolve_svg_path_is_shared_by_keep_pdf(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    dotted_dir = tmp_path / "build" / "v0.1"
+
+    svg = pipeline._resolve_svg_path("doc", dotted_dir)
+
+    assert svg == dotted_dir / "doc.svg"
+    assert dotted_dir.is_dir()
+    assert pipeline._resolve_svg_path("doc", tmp_path / "out.SVG") == tmp_path / "out.SVG"
+
+
+def test_parse_transform_supports_scale_and_rotate(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    x, y = pipeline._transform_point(pipeline._parse_transform("translate(10 5) scale(2)"), 1, 1)
+    assert (x, y) == (12, 7)
+    x, y = pipeline._transform_point(pipeline._parse_transform("rotate(90)"), 1, 0)
+    assert abs(x) < 1e-9 and abs(y - 1) < 1e-9
+
+
+def test_match_font_variant_treats_oblique_as_slanted(monkeypatch, tmp_path):
+    fonts = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.fonts")
+    normal = fonts.FontVariant("Foo", "/f/a.ttf", "Normal", "400", "100%", False)
+    oblique = fonts.FontVariant("Foo", "/f/b.ttf", "Oblique", "400", "100%", False)
+
+    assert fonts.match_font_variant(fonts.FontDependency("Foo", "italic"), [normal, oblique]) == oblique
+    assert fonts.match_font_variant(fonts.FontDependency("Foo", "oblique"), [normal, oblique]) == oblique
+
+
+def test_get_fonts_passes_font_paths(monkeypatch, tmp_path):
+    fonts = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.fonts")
+    calls: list[list[str]] = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, "Foo\n  └ /f/foo.ttf\n      Style: Normal, Weight: 400, Stretch: 100%\n", ""
+        )
+
+    monkeypatch.setattr(fonts.subprocess, "run", run)
+    fonts._get_fonts.cache_clear()
+    try:
+        variants = fonts.get_fonts([tmp_path / "fonts"])
+    finally:
+        fonts._get_fonts.cache_clear()
+
+    assert calls == [["typst", "fonts", "--variants", "--font-path", str(tmp_path / "fonts")]]
+    assert variants == [fonts.FontVariant("Foo", "/f/foo.ttf", "Normal", "400", "100%", False)]
+
+
+def test_missing_typst_raises_clear_error(monkeypatch, tmp_path):
+    pipeline = import_typ2svg_module(monkeypatch, tmp_path, "typ2svg.pipeline")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    try:
+        pipeline.compile_typst("a.typ", "a.pdf")
+    except FileNotFoundError as error:
+        assert "typst" in str(error)
+    else:
+        raise AssertionError("expected FileNotFoundError")

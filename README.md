@@ -26,4 +26,4 @@ or from the command line:
 typ2svg input.typ output.svg
 ```
 
-`typ2svg` asserts at import time that `typst` is available on `PATH`.
+`typst` must be available on `PATH`; a `FileNotFoundError` is raised when it is first needed.

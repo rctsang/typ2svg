@@ -1,12 +1,4 @@
 from importlib.resources import files
-from shutil import which
-
-
-def _assert_program(name: str) -> None:
-    assert which(name) is not None, f"required external program not found on PATH: {name}"
-
-
-_assert_program("typst")
 
 from .pipeline import compile_typst, mupdf_convert, typ2svg
 
