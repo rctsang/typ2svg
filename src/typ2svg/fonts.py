@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
-import warnings
 from base64 import b64encode
 from functools import lru_cache
 from io import BytesIO
@@ -11,7 +11,9 @@ from shutil import which
 from typing import Iterable, NamedTuple
 
 from fontTools import subset as ft_subset
-from fontTools.ttLib import TTFont
+from fontTools.ttLib import TTCollection, TTFont
+
+log = logging.getLogger(__name__)
 
 
 class FontVariant(NamedTuple):
@@ -36,6 +38,7 @@ RE_ATTR = re.compile(
     r"(Style|Weight|Stretch):\s*([^,]+)")
 FONT_ALIAS_NAME_IDS = {1, 4, 6, 16, 21}
 EMBEDDED_LOCATION = "(Embedded)"
+FAMILY_NAME_IDS = {1, 16, 21}
 
 
 def require_program(name: str) -> None:
@@ -121,7 +124,7 @@ def encode_variant(variant: FontVariant, text: str | None = None) -> str:
         raise ValueError(
             f"font variant must be installed locally: {variant.family}"
         )
-    font = TTFont(variant.location)
+    font = TTFont(variant.location, fontNumber=_font_number(variant))
     try:
         if text is not None:
             options = ft_subset.Options()
@@ -129,7 +132,10 @@ def encode_variant(variant: FontVariant, text: str | None = None) -> str:
             options.notdef_outline = True
             subsetter = ft_subset.Subsetter(options)
             subsetter.populate(text=text)
-            subsetter.subset(font)
+            # The subsetter logs notes (e.g. "FFTM NOT subset; dropped") for
+            # tables it drops; they are harmless, so keep them out of stderr.
+            with _quiet_logger("fontTools.subset"):
+                subsetter.subset(font)
         font.flavor = "woff2"
         buf = BytesIO()
         font.save(buf)
@@ -149,36 +155,116 @@ def _font_alias_key(family: str) -> str:
     return family.casefold()
 
 
+class _Face(NamedTuple):
+    """Metadata for one font inside a font file (or font collection)."""
+    aliases: frozenset[str]
+    families: frozenset[str]
+    weight: int | None
+    italic: bool
+
+
+class _quiet_logger:
+    def __init__(self, name: str, level: int = logging.ERROR) -> None:
+        self.logger = logging.getLogger(name)
+        self.level = level
+
+    def __enter__(self) -> None:
+        self.previous = self.logger.level
+        self.logger.setLevel(self.level)
+
+    def __exit__(self, *args: object) -> None:
+        self.logger.setLevel(self.previous)
+
+
+def _face_metadata(font: TTFont) -> _Face:
+    aliases: set[str] = set()
+    families: set[str] = set()
+    for record in font["name"].names:
+        if record.nameID not in FONT_ALIAS_NAME_IDS:
+            continue
+        try:
+            name = record.toUnicode().strip()
+        except UnicodeDecodeError:
+            continue
+        if not name:
+            continue
+        aliases.add(name)
+        if record.nameID in FAMILY_NAME_IDS:
+            families.add(name.casefold())
+
+    weight: int | None = None
+    italic = False
+    if "OS/2" in font:
+        os2 = font["OS/2"]
+        weight = int(os2.usWeightClass)
+        italic = bool(os2.fsSelection & 0b1) or bool(os2.fsSelection & 0b1000000000)
+    elif "head" in font:
+        italic = bool(font["head"].macStyle & 0b10)
+    return _Face(frozenset(aliases), frozenset(families), weight, italic)
+
+
+def _is_collection(location: str) -> bool:
+    with open(location, "rb") as file:
+        return file.read(4) == b"ttcf"
+
+
 @lru_cache(maxsize=None)
-def _font_metadata_aliases(location: str) -> frozenset[str]:
+def _font_faces(location: str) -> tuple[_Face, ...]:
+    """Read every face in a font file; ``.ttc``/``.otc`` files hold several."""
+    if _is_collection(location):
+        collection = TTCollection(location, lazy=True)
+        try:
+            return tuple(_face_metadata(font) for font in collection.fonts)
+        finally:
+            collection.close()
     font = TTFont(location, lazy=True)
     try:
-        names: set[str] = set()
-        for record in font["name"].names:
-            if record.nameID not in FONT_ALIAS_NAME_IDS:
-                continue
-            try:
-                name = record.toUnicode().strip()
-            except UnicodeDecodeError:
-                continue
-            if name:
-                names.add(name)
-        return frozenset(names)
+        return (_face_metadata(font),)
     finally:
         font.close()
+
+
+def _face_index(variant: FontVariant) -> int | None:
+    """Index of the face in ``variant.location`` that best matches ``variant``.
+
+    Typst lists collection faces by file path only, so the face is picked by
+    family name, then weight and italic flag.
+    """
+    try:
+        faces = _font_faces(variant.location)
+    except Exception as error:
+        # Non-critical: the font just can't be matched by alias or embedded.
+        log.debug("could not read font %s: %s", variant.location, error)
+        return None
+    if len(faces) == 1:
+        return 0
+
+    family = variant.family.casefold()
+    weight = _normalize_weight(variant.weight)
+    italic = _normalize_style(variant.style) in {"Italic", "Oblique"}
+
+    def score(index: int) -> tuple[int, int, int]:
+        face = faces[index]
+        weight_score = 0
+        if weight is not None and weight.isdigit() and face.weight is not None:
+            weight_score = -abs(int(weight) - face.weight)
+        return (family in face.families, face.italic == italic, weight_score)
+
+    return max(range(len(faces)), key=score)
+
+
+def _font_number(variant: FontVariant) -> int:
+    index = _face_index(variant)
+    return 0 if index is None else index
 
 
 def font_aliases(variant: FontVariant) -> set[str]:
     aliases = {variant.family}
     if variant.location == EMBEDDED_LOCATION:
         return aliases
-    try:
-        aliases.update(_font_metadata_aliases(variant.location))
-    except Exception as error:
-        warnings.warn(
-            f"could not read font names from {variant.location}: {error}",
-            stacklevel=2,
-        )
+    index = _face_index(variant)
+    if index is not None:
+        aliases.update(_font_faces(variant.location)[index].aliases)
     return aliases
 
 
